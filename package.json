@@ -1,0 +1,10 @@
+{
+  "name": "ai-council",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ask several AI models, let them critique each other, get one final answer.",
+  "scripts": {
+    "test": "node test/test.js"
+  },
+  "engines": { "node": ">=18" }
+}

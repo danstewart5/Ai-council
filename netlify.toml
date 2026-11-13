@@ -1,0 +1,15 @@
+# No build step: static files in /public, functions in /netlify/functions.
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+  command = ""
+
+[functions]
+  node_bundler = "zisi"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"
