@@ -5,6 +5,8 @@
 //   { round: 1, mode, question }                         -> { round, answers[], cost }
 //   { round: 2, mode, question, previous: answers[] }    -> { round, answers[], cost }
 //   { round: 3, mode, question, previous: answers[] }    -> { round, final, cost }
+//   { round: "critique", mode, question, finalText, feedback }                      -> { round, answers[], cost }
+//   { round: "revise", mode, question, previous, finalText, feedback, critiques? }  -> { round, final, cost }
 //
 // The frontend calls once per round so each request stays short.
 
@@ -14,6 +16,7 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const CALL_TIMEOUT_MS = 25000;
 const MAX_QUESTION_CHARS = 6000;
 const MAX_ANSWER_CHARS = 8000;
+const MAX_FEEDBACK_CHARS = 2000;
 
 const HEADERS = {
   "Content-Type": "application/json",
@@ -100,11 +103,31 @@ const SYSTEM_R2 =
   "First, briefly list the main weaknesses, errors or gaps you see in the other answers (and in your own). " +
   "Then write your improved final answer. Format:\n\n**Critique**\n- ...\n\n**Improved answer**\n...";
 
+const FINAL_FORMAT =
+  "Format:\n" +
+  "1. Start with a heading `### Recommendation` followed by a clear, decisive recommendation in 1–3 sentences " +
+  "that the user can simply approve or send back.\n" +
+  "2. Then the supporting answer: the key reasoning, details and next steps, concise, using short paragraphs or bullets.\n" +
+  "3. End with two short sections:\n\n### Where they agreed\n- ...\n\n### Where they disagreed\n- ...\n\n" +
+  "If they did not meaningfully disagree, say so in one line. Do not mention round numbers.";
+
 const SYSTEM_R3 =
   "You are the chair of an AI council. Several models answered a question, critiqued each other and improved their answers. " +
   "Write the single best final answer for the user, combining the strongest points and fixing any errors. " +
-  "Be clear and concise. End with two short sections:\n\n### Where they agreed\n- ...\n\n### Where they disagreed\n- ...\n\n" +
-  "If they did not meaningfully disagree, say so in one line. Do not mention round numbers.";
+  "The user will review your answer and either approve it or send it back with feedback, so present a clear recommendation " +
+  "they can approve, not a list of vague options.\n\n" +
+  FINAL_FORMAT;
+
+const SYSTEM_CRITIQUE =
+  "You are one member of an AI council. The chair wrote a final answer, and the user sent it back with feedback. " +
+  "Briefly critique the final answer in light of the user's feedback: what is missing, wrong or off-target, and concrete " +
+  "suggestions for how the revision should change. Use short bullet points. Do not rewrite the whole answer.";
+
+const SYSTEM_REVISE =
+  "You are the chair of an AI council. You previously wrote a final answer to the user's question, and the user sent it back " +
+  "with feedback. Write a revised final answer that directly addresses the feedback, keeping what was good and using the " +
+  "council's answers (and any council critiques) where helpful. Present a clear recommendation the user can approve.\n\n" +
+  FINAL_FORMAT;
 
 function cleanPrevious(previous, allowedIds) {
   if (!Array.isArray(previous)) return [];
@@ -119,6 +142,52 @@ function cleanPrevious(previous, allowedIds) {
 
 function sumCost(items) {
   return items.reduce((s, a) => s + (Number(a.cost) || 0), 0);
+}
+
+function cleanText(v, max) {
+  return typeof v === "string" ? v.trim().slice(0, max) : "";
+}
+
+function councilText(items) {
+  return items.map((a) => `--- ${a.name} ---\n${a.text}`).join("\n\n");
+}
+
+// Cheap models each critique the previous final answer in light of the user's feedback.
+async function runCritique(question, members, finalText, feedback) {
+  const userMsg =
+    `Question:\n${question}\n\nThe chair's final answer:\n${finalText}\n\n` +
+    `The user's feedback (why they sent it back):\n${feedback}\n\nGive your critique and suggestions.`;
+  const answers = await Promise.all(
+    members.map((m) =>
+      callModel(
+        m,
+        [
+          { role: "system", content: SYSTEM_CRITIQUE },
+          { role: "user", content: userMsg },
+        ],
+        MAX_TOKENS.round2
+      )
+    )
+  );
+  return { round: "critique", answers, cost: sumCost(answers) };
+}
+
+// Opus revises its previous final answer using the feedback (and optional critiques).
+async function runRevise(question, previous, finalText, feedback, critiques) {
+  let userMsg =
+    `Question:\n${question}\n\nCouncil members' answers:\n${councilText(previous) || "(none)"}\n\n` +
+    `Your previous final answer:\n${finalText}\n\nThe user's feedback:\n${feedback}`;
+  if (critiques.length) userMsg += `\n\nCouncil critiques of your previous answer:\n${councilText(critiques)}`;
+  userMsg += "\n\nWrite the revised final answer.";
+  const final = await callModel(
+    FINAL,
+    [
+      { role: "system", content: SYSTEM_REVISE },
+      { role: "user", content: userMsg },
+    ],
+    MAX_TOKENS.final
+  );
+  return { round: "revise", final, cost: final.cost || 0 };
 }
 
 async function runRound1(question, members) {
@@ -204,7 +273,7 @@ exports.handler = async (event) => {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const round = Number(input.round);
+  const round = input.round === "critique" || input.round === "revise" ? input.round : Number(input.round);
   const members = councilFor(input.mode);
   const question = typeof input.question === "string" ? input.question.trim() : "";
 
@@ -230,7 +299,22 @@ exports.handler = async (event) => {
       return json(200, result);
     }
 
-    return json(400, { error: "round must be 1, 2 or 3." });
+    if (round === "critique" || round === "revise") {
+      const finalText = cleanText(input.finalText, MAX_ANSWER_CHARS);
+      const feedback = cleanText(input.feedback, MAX_FEEDBACK_CHARS);
+      if (!finalText) return json(400, { error: "Missing the previous final answer." });
+      if (!feedback) return json(400, { error: "Please enter feedback for the council." });
+
+      if (round === "critique") return roundResponse(await runCritique(question, members, finalText, feedback));
+
+      const previous = cleanPrevious(input.previous, ids);
+      const critiques = cleanPrevious(input.critiques, ids);
+      const result = await runRevise(question, previous, finalText, feedback, critiques);
+      if (result.final.error) return json(502, { error: result.final.error, cost: result.cost });
+      return json(200, result);
+    }
+
+    return json(400, { error: 'round must be 1, 2, 3, "critique" or "revise".' });
   } catch (err) {
     return json(500, { error: `Server error: ${err.message}` });
   }

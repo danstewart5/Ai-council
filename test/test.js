@@ -96,6 +96,67 @@ const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-12, `${a} != ${b}`);
   close(r.data.cost, 0.02);
   assert.ok(r.data.final.text.includes(FINAL.id));
 
+  // Final prompt asks for a clear recommendation to approve
+  assert.ok(/approve/i.test(calls[0].body.messages[0].content));
+  assert.ok(/### Recommendation/.test(calls[0].body.messages[0].content));
+  const finalText = r.data.final.text;
+
+  // Critique: cheap models critique the final answer in light of feedback, in parallel, round-2 cap
+  calls.length = 0;
+  r = await post({ round: "critique", mode: "full", question: "Q", finalText, feedback: "too generic, focus on Nanaimo trades" });
+  assert.strictEqual(r.statusCode, 200);
+  assert.strictEqual(r.data.round, "critique");
+  assert.strictEqual(calls.length, 3);
+  assert.deepStrictEqual(calls.map((c) => c.body.model), COUNCIL.map((m) => m.id));
+  calls.forEach((c) => {
+    assert.strictEqual(c.body.max_tokens, MAX_TOKENS.round2);
+    assert.deepStrictEqual(c.body.usage, { include: true });
+    const msg = c.body.messages[1].content;
+    assert.ok(msg.includes(finalText) && msg.includes("Nanaimo trades"));
+  });
+  close(r.data.cost, 0.007);
+  const critiques = r.data.answers;
+
+  // Critique in quick mode uses 2 models
+  calls.length = 0;
+  r = await post({ round: "critique", mode: "quick", question: "Q", finalText, feedback: "fb" });
+  assert.strictEqual(calls.length, 2);
+  close(r.data.cost, 0.003);
+
+  // Revise without critiques: one Opus call with question, council answers, previous final, feedback
+  calls.length = 0;
+  r = await post({ round: "revise", mode: "full", question: "Original Q", previous: r1, finalText, feedback: "shorter please" });
+  assert.strictEqual(r.statusCode, 200);
+  assert.strictEqual(r.data.round, "revise");
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].body.model, FINAL.id);
+  assert.strictEqual(calls[0].body.max_tokens, MAX_TOKENS.final);
+  let msg = calls[0].body.messages[1].content;
+  assert.ok(msg.includes("Original Q") && msg.includes(finalText) && msg.includes("shorter please"));
+  COUNCIL.forEach((m) => assert.ok(msg.includes(`answer from ${m.id}`)));
+  assert.ok(!msg.includes("Council critiques"));
+  assert.ok(/approve/i.test(calls[0].body.messages[0].content));
+  close(r.data.cost, 0.02);
+
+  // Revise with critiques included
+  calls.length = 0;
+  r = await post({ round: "revise", mode: "full", question: "Q", previous: r1, finalText, feedback: "fb", critiques });
+  msg = calls[0].body.messages[1].content;
+  assert.ok(msg.includes("Council critiques"));
+  close(r.data.cost, 0.02);
+
+  // Revise/critique validation
+  assert.strictEqual((await post({ round: "revise", mode: "full", question: "Q", finalText, feedback: " " })).statusCode, 400);
+  assert.strictEqual((await post({ round: "critique", mode: "full", question: "Q", feedback: "x" })).statusCode, 400);
+  assert.strictEqual((await post({ round: "bogus", mode: "full", question: "Q" })).statusCode, 400);
+
+  // Revise failure (402) -> 502 with friendly message
+  statusOverride = 402;
+  r = await post({ round: "revise", mode: "quick", question: "Q", previous: [], finalText, feedback: "fb" });
+  assert.strictEqual(r.statusCode, 502);
+  assert.ok(/credits/.test(r.data.error));
+  statusOverride = null;
+
   // Partial failure in round 1: still 200, failing model has error, cost of others summed
   failModel = COUNCIL[1].id;
   r = await post({ round: 1, mode: "full", question: "x" });

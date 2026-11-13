@@ -180,3 +180,27 @@ details .inner { padding: 0 12px 10px; }
 .history-actions { text-align: center; margin-top: 18px; }
 
 .empty { color: var(--muted); text-align: center; padding: 20px 8px; font-size: .95rem; }
+
+.badge {
+  display: inline-block; font-size: .72rem; font-weight: 700; padding: 1px 8px; border-radius: 999px;
+  margin-right: 4px; vertical-align: 1px;
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.badge.pending { background: var(--warn-bg); color: #c99a1c; }
+.approved {
+  margin: 4px 0 8px; font-weight: 600; color: var(--ok); font-size: .95rem;
+}
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 6px; }
+.actions .btn { min-height: 46px; padding: 10px; }
+.btn.approve { background: var(--ok); border-color: var(--ok); color: #06231a; }
+.sendback { margin: 6px 0 8px; }
+.sendback textarea { min-height: 90px; font-size: 16px; }
+.check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: .95rem; cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.entry-status { color: var(--muted); font-size: .9rem; margin-top: 4px; }
+.entry-status.err { color: var(--danger); }
+.feedback-note {
+  font-size: .9rem; color: var(--muted); background: var(--surface-2);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; white-space: pre-wrap;
+}
+.feedback-note strong { color: var(--text); }

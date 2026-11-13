@@ -103,6 +103,7 @@
     els.quick.disabled = on;
     els.full.disabled = on;
     els.question.disabled = on;
+    els.results.querySelectorAll("[data-action]").forEach((b) => (b.disabled = on));
     els.progress.hidden = !on;
     if (text) els.progressText.textContent = text;
     if (!on) renderSpend();
@@ -213,7 +214,8 @@
         ts: new Date().toISOString(),
         mode,
         question,
-        final: { name: r3.final.name, text: r3.final.text },
+        versions: [{ name: r3.final.name, text: r3.final.text, ts: new Date().toISOString(), cost: Number(r3.cost) || 0 }],
+        approved: null,
         rounds: {
           1: r1.answers.map(slim),
           2: r2.answers.map(slim),
@@ -254,21 +256,197 @@
     return "<details><summary>" + esc(title) + '</summary><div class="inner">' + items + "</div></details>";
   }
 
-  function entryHtml(e) {
-    const date = new Date(e.ts);
-    const when = isNaN(date) ? "" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-    const modeLabel = e.mode === "full" ? "Full Council" : "Quick";
+  function versionsOf(e) {
+    if (Array.isArray(e.versions) && e.versions.length) return e.versions;
+    return e.final ? [{ name: e.final.name, text: e.final.text, ts: e.ts, cost: 0 }] : [];
+  }
+
+  function fmtDate(ts) {
+    const d = new Date(ts);
+    return isNaN(d) ? "" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  function versionLabel(i) {
+    return i === 0 ? "Original answer" : "Revision " + i;
+  }
+
+  function oldVersionHtml(v, i) {
     return (
-      '<article class="entry card">' +
+      '<div class="model-answer">' +
+        '<div class="label">' + esc(versionLabel(i)) + " · " + esc(v.name) + "</div>" +
+        (v.feedback ? '<div class="feedback-note"><strong>Feedback that led to this:</strong> ' + esc(v.feedback) + "</div>" : "") +
+        '<div class="md">' + window.renderMarkdown(v.text) + "</div>" +
+      "</div>"
+    );
+  }
+
+  function entryHtml(e) {
+    const versions = versionsOf(e);
+    const latestIdx = versions.length - 1;
+    const latest = versions[latestIdx] || { name: "", text: "" };
+    const when = fmtDate(e.ts);
+    const modeLabel = e.mode === "full" ? "Full Council" : "Quick";
+    const status = e.approved
+      ? '<span class="badge ok">Approved ✓</span>'
+      : '<span class="badge pending">Awaiting approval</span>';
+
+    // Feedback that led to each revision, newest version's feedback shown above it.
+    const feedbackNote = latest.feedback
+      ? '<div class="feedback-note"><strong>Your feedback:</strong> ' + esc(latest.feedback) + "</div>"
+      : "";
+    const critiques = latest.critiques && latest.critiques.length ? roundHtml("Council critiques for " + versionLabel(latestIdx), latest.critiques) : "";
+
+    const older = versions.slice(0, latestIdx);
+    const olderHtml = older.length
+      ? "<details><summary>Previous versions (" + older.length + ')</summary><div class="inner">' +
+          older.map(oldVersionHtml).reverse().join("") + "</div></details>"
+      : "";
+
+    const approvedHtml = e.approved
+      ? '<div class="approved">Approved ✓ · ' + esc(fmtDate(e.approved.ts)) +
+          (versions.length > 1 ? " · " + esc(versionLabel(e.approved.version)) : "") + "</div>"
+      : "";
+
+    const actions = e.approved
+      ? ""
+      : '<div class="actions">' +
+          '<button class="btn approve" type="button" data-action="approve" data-id="' + e.id + '">Approve</button>' +
+          '<button class="btn secondary" type="button" data-action="sendback" data-id="' + e.id + '">Send back</button>' +
+        "</div>" +
+        '<form class="sendback" data-id="' + e.id + '" hidden>' +
+          '<label class="sr-only" for="fb-' + e.id + '">Feedback</label>' +
+          '<textarea id="fb-' + e.id + '" rows="3" maxlength="2000" placeholder="What should change? e.g. too generic, focus on Nanaimo trades"></textarea>' +
+          '<label class="check"><input type="checkbox" name="council"> Have the council weigh in again</label>' +
+          '<div class="actions">' +
+            '<button class="btn primary" type="submit">Submit feedback</button>' +
+            '<button class="btn secondary" type="button" data-action="cancel" data-id="' + e.id + '">Cancel</button>' +
+          "</div>" +
+          '<div class="entry-status" role="status" hidden></div>' +
+        "</form>";
+
+    const finalLabel = latestIdx === 0 ? "Final answer" : "Revision " + latestIdx;
+    return (
+      '<article class="entry card" data-id="' + e.id + '">' +
         '<p class="q">' + esc(e.question) + "</p>" +
-        '<div class="meta">' + esc(modeLabel) + (when ? " · " + esc(when) : "") + "</div>" +
-        '<div class="final"><div class="label">Final answer · ' + esc(e.final.name) + '</div><div class="md">' +
-          window.renderMarkdown(e.final.text) + "</div></div>" +
+        '<div class="meta">' + status + " " + esc(modeLabel) + (when ? " · " + esc(when) : "") + "</div>" +
+        feedbackNote +
+        '<div class="final"><div class="label">' + esc(finalLabel) + " · " + esc(latest.name) + '</div><div class="md">' +
+          window.renderMarkdown(latest.text) + "</div></div>" +
+        approvedHtml +
+        actions +
+        critiques +
+        olderHtml +
         roundHtml("Round 1 — independent answers", e.rounds[1]) +
         roundHtml("Round 2 — critiques & improvements", e.rounds[2]) +
-        '<div class="cost">Cost of this question: <strong>' + money(e.cost) + "</strong></div>" +
+        '<div class="cost">Cost of this question: <strong>' + money(e.cost) + "</strong>" +
+          (versions.length > 1 ? " (incl. " + (versions.length - 1) + " revision" + (versions.length > 2 ? "s" : "") + ")" : "") +
+        "</div>" +
       "</article>"
     );
+  }
+
+  // ---------- approve / send back ----------
+  function updateEntry(id, fn) {
+    const history = load(HISTORY_KEY, []);
+    const e = history.find((x) => String(x.id) === String(id));
+    if (!e) return null;
+    fn(e);
+    save(HISTORY_KEY, history);
+    return e;
+  }
+
+  function approve(id) {
+    updateEntry(id, (e) => {
+      e.approved = { ts: new Date().toISOString(), version: versionsOf(e).length - 1 };
+    });
+    renderHistory();
+  }
+
+  async function revise(id, form) {
+    if (busy) return;
+    const box = form.querySelector("textarea");
+    const status = form.querySelector(".entry-status");
+    const useCouncil = form.querySelector('input[name="council"]').checked;
+    const feedback = box.value.trim();
+    const setStatus = (msg, isErr) => {
+      status.textContent = msg;
+      status.className = "entry-status" + (isErr ? " err" : "");
+      status.hidden = !msg;
+    };
+    if (!feedback) {
+      setStatus("Type your feedback first.", true);
+      box.focus();
+      return;
+    }
+    if (getSpent() >= budget) {
+      setStatus("Monthly budget reached — revisions are blocked until next month.", true);
+      renderSpend();
+      return;
+    }
+
+    const e = load(HISTORY_KEY, []).find((x) => String(x.id) === String(id));
+    if (!e) return;
+    const versions = versionsOf(e);
+    const finalText = versions[versions.length - 1].text;
+    const previous = bestAnswers(e.rounds[1] || [], e.rounds[2] || []);
+    const n = versions.length;
+
+    let spent = 0;
+    const charge = (c) => {
+      c = Number(c) || 0;
+      spent += c;
+      addSpent(c);
+    };
+    const formEls = form.querySelectorAll("button, textarea, input");
+
+    try {
+      setBusy(true, "Revising…");
+      formEls.forEach((el) => (el.disabled = true));
+      let critiques = [];
+      if (useCouncil) {
+        setStatus("Council is weighing in on your feedback…");
+        els.progressText.textContent = "Council weighing in on Revision " + n + "…";
+        const c = await post({ round: "critique", mode: e.mode, question: e.question, finalText, feedback });
+        charge(c.cost);
+        critiques = c.answers;
+      }
+      setStatus("Opus is writing Revision " + n + "…");
+      els.progressText.textContent = "Writing Revision " + n + "…";
+      const r = await post({
+        round: "revise",
+        mode: e.mode,
+        question: e.question,
+        previous,
+        finalText,
+        feedback,
+        critiques: critiques.filter((a) => !a.error).map((a) => ({ model: a.model, text: a.text })),
+      });
+      charge(r.cost);
+      updateEntry(id, (x) => {
+        x.versions = versionsOf(x).concat([
+          {
+            name: r.final.name,
+            text: r.final.text,
+            ts: new Date().toISOString(),
+            cost: spent,
+            feedback,
+            critiques: critiques.map(slim),
+          },
+        ]);
+        x.approved = null;
+        x.cost = (Number(x.cost) || 0) + spent;
+      });
+      setBusy(false);
+      renderHistory();
+      const el = els.results.querySelector('article[data-id="' + id + '"]');
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      if (err.cost) charge(err.cost);
+      if (spent) updateEntry(id, (x) => (x.cost = (Number(x.cost) || 0) + spent));
+      formEls.forEach((el) => (el.disabled = false));
+      setStatus(err.message + (spent ? " (Cost so far: " + money(spent) + ")" : ""), true);
+      setBusy(false);
+    }
   }
 
   function renderHistory() {
@@ -287,6 +465,23 @@
   els.full.addEventListener("click", () => ask("full"));
   els.question.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask("full");
+  });
+  els.results.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-action]");
+    if (!btn || busy) return;
+    const id = btn.dataset.id;
+    const form = els.results.querySelector('form.sendback[data-id="' + id + '"]');
+    if (btn.dataset.action === "approve") approve(id);
+    else if (btn.dataset.action === "sendback" && form) {
+      form.hidden = false;
+      form.querySelector("textarea").focus();
+    } else if (btn.dataset.action === "cancel" && form) form.hidden = true;
+  });
+  els.results.addEventListener("submit", (ev) => {
+    const form = ev.target.closest("form.sendback");
+    if (!form) return;
+    ev.preventDefault();
+    revise(form.dataset.id, form);
   });
   els.clear.addEventListener("click", () => {
     if (confirm("Clear all saved questions and answers on this device? (Monthly spending total is kept.)")) {
